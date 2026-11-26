@@ -7,6 +7,7 @@ pub mod util;
 pub mod text_codec;
 pub mod git;
 pub mod wsl;
+pub mod wsl_agent;
 pub mod remote;
 pub mod syntax;
 pub mod text_editing;

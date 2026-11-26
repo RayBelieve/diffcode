@@ -437,9 +437,9 @@ impl App {
         let visible = self.window_visible;
         let selected = self.selected;
         for p in &mut self.projects {
-            // How often a repository that cannot be watched (inside WSL) is looked at: the one on screen often enough
-            // to follow an agent at work, the others for their counts in the list.
-            let poll_every = Duration::from_secs(if Some(p.id) == selected { 2 } else { 10 });
+            // A WSL project with its helper running is not polled at all (polls is false); this is the fallback when
+            // the helper cannot start.
+            let poll_every = Duration::from_secs(if Some(p.id) == selected { 5 } else { 10 });
             if let Some(t) = p.tick(visible, poll_every) {
                 next = Some(next.map_or(t, |n| n.min(t)));
             }
@@ -1132,11 +1132,10 @@ impl App {
     /// The user picked a commit or one of its files: the viewer goes back to following the Log.
     pub fn picked_in_log(&mut self, id: ProjectId, commit_changed: bool) {
         let Some(p) = self.project_mut(id) else { return };
-        if p.browsed_path.is_none() {
-            return;
-        }
         p.browsed_path = None;
-        // A click on the row that is already selected changes nothing, so nothing else would bring its diff back.
+        // The selection changed in the Log, so its files (or the picked file's diff) must be loaded even when no
+        // file was being browsed. The Mac gets this from SwiftUI's `onChange`; this port has no such hook, so it
+        // happens here. Returning early when nothing was browsed left the first commit's files on screen.
         if commit_changed {
             self.commit_selection_changed(id);
         } else {

@@ -224,8 +224,9 @@ pub struct Project {
     pub compare_error: Option<String>,
 
     watcher: Option<FileWatcher>,
-    /// A repository inside WSL: Windows hears of no change on a distro's share, so its status is asked for again every
-    /// few seconds instead of watched (issue #7).
+    /// A repository inside WSL: one persistent helper watches it and runs git requests. `polls` is the fallback for
+    /// when that helper cannot start.
+    wsl_agent: Option<std::sync::Arc<crate::core::wsl_agent::Agent>>,
     polls: bool,
     /// Look again at the next tick, whatever the interval: the window came back to the front.
     poll_due: bool,
@@ -327,6 +328,7 @@ impl Project {
             is_loading_compare: false,
             compare_error: None,
             watcher: None,
+            wsl_agent: None,
             polls: false,
             poll_due: false,
             refresh_running: false,
@@ -367,6 +369,11 @@ impl Project {
     /// cannot be watched is looked at again every `poll_every`.
     pub fn tick(&mut self, visible: bool, poll_every: Duration) -> Option<Instant> {
         Jobs::run(self, |p| &mut p.jobs);
+        if self.wsl_agent.as_ref().is_some_and(|agent| !agent.is_alive()) {
+            self.wsl_agent = None;
+            self.polls = true;
+            self.schedule_refresh();
+        }
         if self.refresh_at.is_some_and(|t| t <= Instant::now()) {
             self.refresh_at = None;
             if visible {
@@ -477,11 +484,31 @@ impl Project {
     // MARK: Watching and refresh
 
     pub fn start_watching(&mut self) {
-        if self.watcher.is_some() || self.polls || self.is_dormant {
+        if self.watcher.is_some() || self.wsl_agent.is_some() || self.polls || self.is_dormant {
             return;
         }
-        // A watch on the share would start and never report anything.
+        // Windows cannot watch a distro's share; the helper inside the distro watches it and serves git requests.
         if crate::core::wsl::location(&self.url).is_some() {
+            let poster = self.jobs.poster();
+            let on_change = move |paths: Vec<String>, git_state: bool| {
+                // The helper reports in order, so the last path is the newest; no metadata read per event.
+                let changed = paths.last().cloned();
+                let poster = poster.clone();
+                poster.post(move |p: &mut Project| {
+                    p.file_index_stale = true;
+                    if git_state && !p.commits.is_empty() {
+                        p.log_stale = true;
+                    }
+                    if let Some(path) = changed {
+                        p.pending_change = Some(path);
+                    }
+                    p.schedule_refresh();
+                });
+            };
+            if let Ok(agent) = crate::core::wsl_agent::Agent::start(&self.url, on_change) {
+                self.wsl_agent = Some(agent);
+                return;
+            }
             self.polls = true;
             return;
         }
@@ -505,6 +532,7 @@ impl Project {
 
     pub fn stop_watching(&mut self) {
         self.watcher = None;
+        self.wsl_agent = None;
         self.polls = false;
     }
 

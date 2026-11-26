@@ -15,6 +15,7 @@ use crate::remote::{self, RepoOperation};
 use crate::text_codec;
 use crate::util::{natural_cmp, split_max, split_nul, split_nul_keep_empty};
 use crate::wsl;
+use crate::wsl_agent;
 
 /// SHA of git's well-known empty tree; used as the base of a repo with no commits.
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -326,8 +327,62 @@ impl Cmd {
         }
     }
 
+    /// Runs through the project's persistent WSL agent. None means the agent was unavailable and `wsl.exe` should
+    /// be used instead; an error after the request was sent is reported as it is, since the command may have run.
+    fn through_agent(&self, agent: &wsl_agent::Agent) -> Option<Result<Vec<u8>>> {
+        let at = wsl::location(&self.dir)?;
+        let mut args: Vec<String> = BASE_ARGS.iter().map(|arg| (*arg).to_string()).collect();
+        args.extend(self.args.iter().map(|arg| at.linux_argument(arg)));
+        let mut envs: Vec<(String, String)> = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                let value = if key.eq_ignore_ascii_case("GIT_INDEX_FILE") {
+                    at.linux_path(value).unwrap_or_else(|| value.clone())
+                } else {
+                    value.clone()
+                };
+                (key.clone(), value)
+            })
+            .collect();
+        for (key, value) in [
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_PAGER", "cat"),
+            ("LC_ALL", "C"),
+        ] {
+            if !envs.iter().any(|(present, _)| present.eq_ignore_ascii_case(key)) {
+                envs.push((key.to_string(), value.to_string()));
+            }
+        }
+        let stdin = self.stdin.clone().unwrap_or_default();
+        match agent.run(&at.linux, &args, &envs, &stdin) {
+            Ok(response) => {
+                if self.ok.contains(&response.status) {
+                    return Some(Ok(response.stdout));
+                }
+                let mut msg = String::from_utf8_lossy(&response.stderr).trim().to_string();
+                let head = String::from_utf8_lossy(&response.stdout[..response.stdout.len().min(4096)]).trim().to_string();
+                if !head.is_empty() && (head.contains("CONFLICT") || msg.is_empty()) {
+                    msg = if msg.is_empty() { head } else { format!("{head}\n{msg}") };
+                }
+                msg = wsl::explain(&msg, &at.distro);
+                Some(Err(Error::Failed { status: response.status, message: msg }))
+            }
+            Err(wsl_agent::AgentError::Unavailable(_)) => None,
+            Err(wsl_agent::AgentError::Failed(message)) => Some(Err(Error::Spawn(message))),
+        }
+    }
+
     /// Runs git and returns stdout. Fails unless the exit status is one of the accepted ones.
     pub fn run(self) -> Result<Vec<u8>> {
+        if self.cancel.is_none() {
+            if let Some(agent) = wsl_agent::for_dir(&self.dir) {
+                if let Some(result) = self.through_agent(&agent) {
+                    return result;
+                }
+            }
+        }
         let mut command = self.command();
         command
             .stdin(if self.stdin.is_some() { Stdio::piped() } else { Stdio::null() })

@@ -74,6 +74,16 @@ jobs:
         working-directory: windows
         run: cargo build -p diffcode --release --locked
 
+      - name: Build WSL helper
+        working-directory: windows
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          $env:RUSTFLAGS = "-C linker=rust-lld -C link-self-contained=yes"
+          $env:CARGO_TARGET_DIR = "target/wsl-agent"
+          cargo build --manifest-path wsl-agent/Cargo.toml --target x86_64-unknown-linux-musl --release --locked
+          New-Item -ItemType Directory -Force target/release/wsl | Out-Null
+          Copy-Item target/wsl-agent/x86_64-unknown-linux-musl/release/diffcode-wsl-agent target/release/wsl/
+
       - name: Package
         working-directory: windows
         env:
@@ -100,7 +110,9 @@ jobs:
 
           # The portable zip: the program in a DiffCode folder, nothing to install.
           New-Item -ItemType Directory -Force target/portable/DiffCode | Out-Null
+          New-Item -ItemType Directory -Force target/portable/DiffCode/wsl | Out-Null
           Copy-Item target/release/DiffCode.exe target/portable/DiffCode/
+          Copy-Item target/release/wsl/diffcode-wsl-agent target/portable/DiffCode/wsl/
           Copy-Item ../LICENSE target/portable/DiffCode/LICENSE.txt
           Copy-Item target/THIRD-PARTY-NOTICES.txt target/portable/DiffCode/
           Compress-Archive -Path target/portable/DiffCode -DestinationPath "$dist/DiffCode-windows-x64.zip"
